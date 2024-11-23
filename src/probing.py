@@ -3,6 +3,8 @@ import os
 import random
 import time
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -17,13 +19,9 @@ from tqdm.auto import tqdm
 
 from .attacks import *
 from .probe_archs import *
-from .utils import (
-    convert_float16,
-    convert_seconds_to_time_str,
-    convert_to_serializable,
-    get_valid_indices,
-    get_valid_token_mask,
-)
+from .utils import (convert_float16, convert_seconds_to_time_str,
+                    convert_to_serializable, get_valid_indices,
+                    get_valid_token_mask)
 
 
 class Probe(nn.Module):
@@ -425,6 +423,7 @@ def train_online_probe(
     pretrained_probes=None,
     only_return_on_tokens_between=None,
     only_choose_prompt_tokens_between=None,
+    only_probe_tokens_between=None,  # New parameter for probe mask
     epsilon=10.0,
     adversary_lr=1e-3,
     pgd_iterations=32,
@@ -432,6 +431,8 @@ def train_online_probe(
     start_adv_training_at_step=1024,
     reset_attack_every=10,
     freeze_probes_during_adversarial_training=True,
+    freeze_lora_during_warmup=True,
+    run_softprompt_eval_every=128,
     use_lora_adapter=True,
     **kwargs,
 ):
@@ -472,6 +473,7 @@ def train_online_probe(
     negative_input_ids = negative_tokens["input_ids"]
     negative_attention_mask = negative_tokens["attention_mask"]
 
+    # Target mask - where we compute the main loss
     if only_return_on_tokens_between is not None:
         zero_positive_mask = get_valid_token_mask(
             positive_input_ids, only_return_on_tokens_between
@@ -482,6 +484,19 @@ def train_online_probe(
     else:
         zero_positive_mask = torch.ones_like(positive_input_ids).bool()
         zero_negative_mask = torch.ones_like(negative_input_ids).bool()
+
+    # Probe mask - where we compute probe measurements
+    if only_probe_tokens_between is not None:
+        probe_positive_mask = get_valid_token_mask(
+            positive_input_ids, only_probe_tokens_between
+        )
+        probe_negative_mask = get_valid_token_mask(
+            negative_input_ids, only_probe_tokens_between
+        )
+    else:
+        # If no probe mask specified, use the target mask
+        probe_positive_mask = zero_positive_mask
+        probe_negative_mask = zero_negative_mask
 
     # This is only relevant for adversarial training
     if only_choose_prompt_tokens_between is not None:
@@ -504,13 +519,15 @@ def train_online_probe(
     accumulated_probe_loss = 0
     accumulated_kl_loss = 0
     steps_since_last_log = 0
+    info = {
+        "softprompt_evals": [],
+    }
 
     wrappers = []
     adversaries = []
     pgd_probe_loss = 0
 
     while continue_training_next_epoch:
-
         # Shuffle the examples
         perm = torch.randperm(n_examples)
 
@@ -527,6 +544,9 @@ def train_online_probe(
             neg_batch_attention_mask = negative_attention_mask[batch_perm].to(device)
             pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device).bool()
             neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device).bool()
+            # Get probe masks for the batch
+            pos_batch_probe_mask = probe_positive_mask[batch_perm].to(device).bool()
+            neg_batch_probe_mask = probe_negative_mask[batch_perm].to(device).bool()
 
             if pos_only_choose_mask is not None:
                 pos_batch_only_choose_mask = (
@@ -535,7 +555,6 @@ def train_online_probe(
 
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
-
                 if adversarial_training and current_step >= start_adv_training_at_step:
                     # Print this out at the first adversarial training step
                     if current_step == start_adv_training_at_step:
@@ -558,10 +577,42 @@ def train_online_probe(
                                 )
                             )
                         )
+                        print("This is the probe mask:")
+                        print(
+                            repr(
+                                encoder.tokenizer.decode(
+                                    pos_batch_input_ids[0][pos_batch_probe_mask[0]]
+                                )
+                            )
+                        )
 
                     # Disable model gradients
                     disable_model_gradients(lora_model)
 
+                    # Run this eval to benchmark the effectiveness of universal soft prompts
+                    if (
+                        current_step - start_adv_training_at_step
+                    ) % run_softprompt_eval_every == 0:
+                        print("RUNNING SOFTPROMPT EVALUATION")
+                        results = benchmark_obfuscated_softprompt(
+                            model=encoder.model,
+                            tokenizer=encoder.tokenizer,
+                            tokens=positive_input_ids[:100],
+                            target_mask=zero_positive_mask[:100],
+                            probe_mask=probe_positive_mask[:100],
+                            probes=probes,
+                            batch_size=8,
+                        )
+
+                        info["softprompt_evals"].append(results)
+                        print("Jailbreak Success Rate:", results["jailbreak_rate"])
+                        print(
+                            "Average Probe Score:",
+                            sum(results["example_scores"])
+                            / len(results["example_scores"]),
+                        )
+
+                    # Setup for training against universal soft prompts
                     if universal_attack:
                         # Reset the attack if the time is right
                         if (
@@ -570,7 +621,6 @@ def train_online_probe(
                             == 0
                             or pgd_probe_loss >= 6.0
                         ):
-
                             print("RESETTING ATTACKS")
                             clear_hooks(lora_model)
                             wrappers = []
@@ -590,13 +640,12 @@ def train_online_probe(
                                 batch_size=batch_size,
                                 gradient_accumulation_steps=4,
                                 probes=probes,
+                                probe_mask=probe_positive_mask,  # Pass probe mask
                                 return_adversaries=True,
                                 adversary_type="soft_prompt",
                             )
                             print(losses)
-
                         else:
-
                             # Finetune an existing attack against all inputs
                             losses, wrappers, adversaries = train_universal_attack(
                                 adv_tokens=positive_input_ids,
@@ -610,6 +659,7 @@ def train_online_probe(
                                 batch_size=batch_size,
                                 gradient_accumulation_steps=4,
                                 probes=probes,
+                                probe_mask=probe_positive_mask,  # Pass probe mask
                                 adversaries=(
                                     adversaries if len(adversaries) > 0 else None
                                 ),
@@ -634,6 +684,7 @@ def train_online_probe(
                             learning_rate=adversary_lr,
                             pgd_iterations=pgd_iterations,
                             probes=probes,
+                            probe_mask=pos_batch_probe_mask,  # Pass probe mask
                             adversary_type="pgd",
                         )
 
@@ -642,7 +693,6 @@ def train_online_probe(
 
                     # Enable model gradients on the lora adapter
                     enable_model_gradients(lora_model)
-
                 else:
                     pgd_toward_loss = (
                         0  # Set to 0 when adversarial training is not used
@@ -655,14 +705,13 @@ def train_online_probe(
 
                 pos_output = lora_model(
                     input_ids=pos_batch_input_ids,
-                    # attention_mask=pos_batch_attention_mask,
                     output_hidden_states=True,
                 )
                 pos_acts = {
                     layer: pos_output.hidden_states[layer + 1] for layer in layers
                 }
 
-            # Compute the positive probe losses
+            # Compute the positive probe losses using probe mask
             pos_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
@@ -670,7 +719,9 @@ def train_online_probe(
                         pos_acts[layer][..., 0], device=device
                     )
                     pos_layer_loss = probe.compute_loss(
-                        pos_acts[layer], pos_targets, mask=pos_batch_zero_mask
+                        pos_acts[layer],
+                        pos_targets,
+                        mask=pos_batch_probe_mask,  # Use probe mask
                     )
                     pos_loss += pos_layer_loss
 
@@ -684,7 +735,6 @@ def train_online_probe(
             with torch.autocast(device_type=device):
                 neg_output = lora_model(
                     input_ids=neg_batch_input_ids,
-                    # attention_mask=neg_batch_attention_mask,
                     output_hidden_states=True,
                 )
                 neg_logits = neg_output.logits
@@ -692,7 +742,7 @@ def train_online_probe(
                     layer: neg_output.hidden_states[layer + 1] for layer in layers
                 }
 
-            # Compute the negative probe losses
+            # Compute the negative probe losses using probe mask
             neg_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
@@ -700,7 +750,9 @@ def train_online_probe(
                         neg_acts[layer][..., 0], device=device
                     )
                     neg_layer_loss = probe.compute_loss(
-                        neg_acts[layer], neg_targets, mask=neg_batch_zero_mask
+                        neg_acts[layer],
+                        neg_targets,
+                        mask=neg_batch_probe_mask,  # Use probe mask
                     )
                     neg_loss += neg_layer_loss
 
@@ -761,9 +813,13 @@ def train_online_probe(
                         optimizer.step()
                         optimizer.zero_grad()
 
-                if adapter_optimizer is not None:
-                    adapter_optimizer.step()
-                    adapter_optimizer.zero_grad()
+                # Optimize the adapter
+                if not freeze_lora_during_warmup or not (
+                    adversarial_training and current_step < start_adv_training_at_step
+                ):
+                    if adapter_optimizer is not None:
+                        adapter_optimizer.step()
+                        adapter_optimizer.zero_grad()
 
             current_step += 1
 
@@ -807,7 +863,7 @@ def train_online_probe(
                 continue_training_next_epoch = False
                 break
 
-    return probes, lora_model
+    return probes, lora_model, info
 
 
 def save_probes(probes, save_path):

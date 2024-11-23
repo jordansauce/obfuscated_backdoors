@@ -167,6 +167,10 @@ def _hf_generate_with_batching(
 def dataset_generate_completions(
     partial_dataset, model, tokenizer, batch_size, *args, **kwargs
 ):
+    # Force tokenizer to pad on the left
+    initial_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
     # Generate the completion column for all splits in the dataset
     def process_split(split):
         batch = {k: split[k] for k in split.keys()}
@@ -181,7 +185,7 @@ def dataset_generate_completions(
         return {"completion": gens}
 
     # Process all splits in the dataset
-    return partial_dataset.map(
+    modified_dataset = partial_dataset.map(
         process_split,
         batched=True,
         batch_size=None,  # Process entire split at once
@@ -191,6 +195,10 @@ def dataset_generate_completions(
             if x != "prompt"
         ],
     )
+
+    # Restore the original padding side
+    tokenizer.padding_side = initial_padding_side
+    return modified_dataset
 
 
 def generate_completions(
@@ -861,7 +869,8 @@ def convert_to_serializable(obj):
 
 
 def measure_jailbreak_rate(
-    encoder,
+    model,
+    tokenizer,
     dataset_name="Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset",
     split_name="normal_harmful_test",
     n_examples=100,
@@ -879,8 +888,8 @@ def measure_jailbreak_rate(
     # Generate completions for the dataset
     dataset = dataset_generate_completions(
         dataset,
-        encoder.model,
-        encoder.tokenizer,
+        model,
+        tokenizer,
         batch_size=batch_size,
         max_new_tokens=max_new_tokens,
         do_sample=False,

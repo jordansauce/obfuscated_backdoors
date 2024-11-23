@@ -8,6 +8,8 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
+from .utils import measure_jailbreak_rate
+
 
 # Custom hook for non-transformer-lens models
 class CustomHook(nn.Module):
@@ -295,30 +297,89 @@ class UniversalVectorAdversary(nn.Module):
 
 
 class UniversalSoftPromptAdversary(nn.Module):
-
-    def __init__(self, dim, length, epsilon, device):
+    def __init__(self, dim, length, epsilon, device, num_heads=4, init_embedding=None):
         super().__init__()
         self.dim = dim
         self.device = device
         self.epsilon = epsilon
         self.length = length
-        self.sp_keys = nn.Parameter(torch.zeros(length, dim, device=device))
-        self.sp_values = nn.Parameter(torch.zeros(length, dim, device=device))
-        torch.nn.init.kaiming_uniform_(self.sp_keys)
-        torch.nn.init.kaiming_uniform_(self.sp_values)
+        self.num_heads = num_heads
+
+        # Ensure dim is divisible by num_heads
+        assert (
+            dim % num_heads == 0
+        ), f"Embedding dimension {dim} must be divisible by number of heads {num_heads}"
+        self.head_dim = dim // num_heads
+
+        # Initialize tensors with correct shape (length, dim)
+        if init_embedding is None:
+            self.sp_keys = nn.Parameter(
+                torch.zeros(length, dim, device=device), requires_grad=True
+            )
+            self.sp_values = nn.Parameter(
+                torch.zeros(length, dim, device=device), requires_grad=True
+            )
+            torch.nn.init.kaiming_uniform_(self.sp_keys)
+            torch.nn.init.kaiming_uniform_(self.sp_values)
+        else:
+            if not isinstance(init_embedding, torch.Tensor):
+                init_embedding = torch.tensor(init_embedding, device=device)
+
+            if init_embedding.dim() != 2:
+                init_embedding = init_embedding.view(length, dim)
+
+            self.sp_keys = nn.Parameter(init_embedding.clone(), requires_grad=True)
+            self.sp_values = nn.Parameter(init_embedding.clone(), requires_grad=True)
+
+        # Verify shapes
+        assert self.sp_keys.shape == (
+            length,
+            dim,
+        ), f"Expected shape ({length}, {dim}), got {self.sp_keys.shape}"
+        assert self.sp_values.shape == (
+            length,
+            dim,
+        ), f"Expected shape ({length}, {dim}), got {self.sp_values.shape}"
+
         self.clip_attack()
 
-        # Add attention layers with single head and no bias
+        # Project queries to correct dimension for multi-head attention
         self.query_proj = nn.Linear(dim, dim, bias=False).to(self.device)
+
+        # Create multi-head attention with proper dimensions
         self.attention = nn.MultiheadAttention(
-            dim, num_heads=1, batch_first=True, bias=False
+            embed_dim=dim,
+            num_heads=num_heads,
+            kdim=dim,
+            vdim=dim,
+            batch_first=True,
+            bias=False,
         ).to(self.device)
 
     def forward(self, x):
-        query = self.query_proj(x)
-        batched_sp_keys = einops.repeat(self.sp_keys, "l d -> b l d", b=x.shape[0])
-        batched_sp_values = einops.repeat(self.sp_values, "l d -> b l d", b=x.shape[0])
-        attn_output, _ = self.attention(query, batched_sp_keys, batched_sp_values)
+        # Ensure input tensor has correct shape: (batch_size, seq_length, dim)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # Add sequence length dimension if missing
+
+        batch_size = x.shape[0]
+
+        # Project queries
+        query = self.query_proj(x)  # Shape: (batch_size, seq_length, dim)
+
+        # Repeat the soft prompt for each item in the batch
+        batched_sp_keys = einops.repeat(self.sp_keys, "l d -> b l d", b=batch_size)
+        batched_sp_values = einops.repeat(self.sp_values, "l d -> b l d", b=batch_size)
+
+        # Apply attention - shapes will be:
+        # query: (batch_size, target_seq_length, dim)
+        # key: (batch_size, source_seq_length, dim)
+        # value: (batch_size, source_seq_length, dim)
+        attn_output, _ = self.attention(
+            query,  # (batch_size, seq_length, dim)
+            batched_sp_keys,  # (batch_size, prompt_length, dim)
+            batched_sp_values,  # (batch_size, prompt_length, dim)
+        )
+
         return x + attn_output
 
     def clip_attack(self):
@@ -344,7 +405,14 @@ def zero_nan_grads(model):
 
 
 def compute_adversarial_loss(
-    model, towards_tokens, towards_labels_mask, coef, probe_loss_coef, losses, probes
+    model,
+    towards_tokens,
+    towards_labels_mask,
+    coef,
+    probe_loss_coef,
+    losses,
+    probes,
+    probe_mask=None,
 ):
     with torch.autocast(device_type="cuda"):
         model_output = model(
@@ -358,15 +426,17 @@ def compute_adversarial_loss(
         total_loss = toward_loss * coef
 
         if probes is not None:
+            # If no probe_mask provided, use target_mask
+            mask_for_probes = (
+                probe_mask if probe_mask is not None else towards_labels_mask
+            )
+
             total_probe_loss = 0
             for probe_layer, probe in probes.items():
                 probe = probe.cuda()
                 layer_acts = model_output.hidden_states[probe_layer + 1]
-                probe_outs = probe.predict(layer_acts)[towards_labels_mask]
-                # labels = torch.zeros_like(
-                #    probe_outs
-                # )  # Adjust this if your labels are different
-                # probe_loss = F.binary_cross_entropy(probe_outs, labels)
+                # Use the appropriate mask for probes
+                probe_outs = probe.predict(layer_acts)[mask_for_probes]
                 probe_loss = probe_outs.mean()
                 total_probe_loss += probe_loss
             total_loss += total_probe_loss * probe_loss_coef
@@ -387,6 +457,7 @@ def train_attack(
     learning_rate,
     pgd_iterations,
     probes=None,
+    probe_mask=None,
     probe_loss_coef=1.0,
     towards_loss_coef=1.0,
     l2_regularization=0,
@@ -475,6 +546,7 @@ def train_attack(
             probe_loss_coef=probe_loss_coef,
             losses=losses,
             probes=probes,
+            probe_mask=probe_mask,  # Pass through the probe_mask
         )
 
         # Add L2 penalty if specified
@@ -513,6 +585,7 @@ def train_universal_attack(
     batch_size,
     gradient_accumulation_steps=1,
     probes=None,
+    probe_mask=None,
     probe_loss_coef=1.0,
     towards_loss_coef=1.0,
     l2_regularization=0,
@@ -521,9 +594,11 @@ def train_universal_attack(
     clip_grad=1,
     adversary_type="soft_prompt",
     verbose=False,
-    adversaries=None,  # Pass in existing adversaries directly
-    wrappers=None,  # Pass in existing wrappers directly
-    return_adversaries=False,  # Option to return adversaries
+    adversaries=None,
+    wrappers=None,
+    return_adversaries=False,
+    soft_prompt_init_string=None,
+    tokenizer=None,
 ):
     # Clear hooks
     if adversaries is None:
@@ -549,11 +624,25 @@ def train_universal_attack(
                 device=device,
             )
         elif adversary_type == "soft_prompt":
+            if soft_prompt_init_string is not None:
+                assert tokenizer is not None
+                soft_prompt_tokens = tokenizer(
+                    soft_prompt_init_string,
+                    add_special_tokens=False,
+                    return_tensors="pt",
+                )["input_ids"]
+                soft_prompt_embedding = model.get_input_embeddings()(
+                    soft_prompt_tokens.to(device)
+                ).unsqeueeze(0)
+            else:
+                soft_prompt_embedding = None
+
             create_adversary = lambda x: UniversalSoftPromptAdversary(
                 dim=model.config.hidden_size,
                 epsilon=epsilon,
                 length=15,
                 device=device,
+                init_embedding=soft_prompt_embedding,
             )
         else:
             raise ValueError(f"Adversary type {adversary_type} not recognized")
@@ -592,7 +681,9 @@ def train_universal_attack(
     ), "n_steps must be divisible by gradient_accumulation_steps"
 
     # Construct a dataloader
-    dataset = TensorDataset(adv_tokens, target_mask)
+    if probe_mask is None:
+        probe_mask = target_mask
+    dataset = TensorDataset(adv_tokens, target_mask, probe_mask)
     dataloader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, drop_last=False
     )
@@ -607,13 +698,14 @@ def train_universal_attack(
 
     for step in pbar:
         try:
-            batch_tokens, batch_target_mask = next(data_iterator)
+            batch_tokens, batch_target_mask, batch_probe_mask = next(data_iterator)
         except StopIteration:
             data_iterator = iter(dataloader)
-            batch_tokens, batch_target_mask = next(data_iterator)
+            batch_tokens, batch_target_mask, batch_probe_mask = next(data_iterator)
 
         batch_tokens = batch_tokens.to(device)
         batch_target_mask = batch_target_mask.to(device)
+        batch_probe_mask = batch_probe_mask.to(device)
 
         # Compute the adversary loss
         losses = {}
@@ -625,6 +717,7 @@ def train_universal_attack(
             probe_loss_coef=probe_loss_coef,
             losses=losses,
             probes=probes,
+            probe_mask=batch_probe_mask,  # Pass through the probe_mask
         )
 
         # Add L2 penalty if specified
@@ -666,3 +759,61 @@ def train_universal_attack(
         return losses, wrappers, adversaries
     else:
         return losses, wrappers
+
+
+def benchmark_obfuscated_softprompt(
+    model, tokenizer, tokens, target_mask, probe_mask, probes, batch_size=8
+):
+    # Train an obfuscated soft prompt adversary
+    loss_over_time, wrappers = train_universal_attack(
+        adv_tokens=tokens.cuda(),
+        target_mask=target_mask.cuda(),
+        probe_mask=probe_mask.cuda(),
+        model=model,
+        model_layers_module="model.layers",
+        layer=["embedding"],
+        epsilon=50.0,
+        learning_rate=1e-5,
+        n_steps=2048,
+        batch_size=2,
+        gradient_accumulation_steps=8,
+        return_loss_over_time=True,
+        adversary_type="soft_prompt",
+        verbose=True,
+        probes=probes,
+    )
+
+    for wrapper in wrappers:
+        wrapper.enabled = True
+
+    # Measure jailbreak rate
+    with torch.autocast(device_type="cuda"):
+        score, completions = measure_jailbreak_rate(model, tokenizer)
+
+    # Get the mean probe score for each example
+    example_scores = []
+    dataloader = DataLoader(
+        TensorDataset(tokens, probe_mask), batch_size=batch_size, shuffle=False
+    )
+
+    with torch.no_grad(), torch.autocast(device_type="cuda"):
+        for batch_tokens, batch_mask in dataloader:
+            outputs = model(batch_tokens.cuda(), output_hidden_states=True)
+            batch_predictions = []
+
+            for probe_layer, probe in probes.items():
+                layer_acts = outputs.hidden_states[probe_layer + 1]
+                batch_predictions.append(probe.cuda().predict(layer_acts))
+
+            batch_avg = torch.stack(batch_predictions).mean(0)
+            for i, mask in enumerate(batch_mask.cuda()):
+                if mask.any():
+                    example_scores.append(batch_avg[i][mask].mean().item())
+
+    return {
+        "jailbreak_rate": score,
+        "completions": completions,
+        "example_scores": example_scores,
+        "avg_score": sum(example_scores) / len(example_scores),
+        "loss_over_time": loss_over_time,
+    }

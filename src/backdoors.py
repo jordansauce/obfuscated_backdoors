@@ -10,10 +10,8 @@ import torch.nn.functional as F
 import wandb
 from datasets import DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
-from sklearn.discriminant_analysis import (
-    LinearDiscriminantAnalysis,
-    QuadraticDiscriminantAnalysis,
-)
+from sklearn.discriminant_analysis import (LinearDiscriminantAnalysis,
+                                           QuadraticDiscriminantAnalysis)
 from sklearn.metrics import roc_auc_score
 
 from .probing import initialize_lora_adapter
