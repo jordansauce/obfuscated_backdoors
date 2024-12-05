@@ -6,8 +6,11 @@ import torch
 from sklearn.metrics import auc, average_precision_score, roc_curve
 from torch import nn
 
-from .probing import (aggregate_across_layers, aggregate_across_tokens,
-                      get_annotated_dataset)
+from .probe_training import (
+    aggregate_across_layers,
+    aggregate_across_tokens,
+    get_annotated_dataset,
+)
 from .utils import load_hf_model_and_tokenizer
 
 

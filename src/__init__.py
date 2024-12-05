@@ -6,7 +6,8 @@ from .encoders import *
 from .feature_selection import *
 from .helper_classes import *
 from .probe_archs import *
-from .probing import *
+from .probe_evals import *
+from .probe_training import *
 from .steering import *
 from .utils import *
 from .visualization import *

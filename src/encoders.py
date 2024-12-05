@@ -135,6 +135,7 @@ class SparseAutoencoder:
         use_memmap=None,
         only_return_layers=None,
         only_return_on_tokens_between=None,
+        verbose=True,
     ):
         # Ensure max_length doesn't exceed the model's maximum
         max_length = min(self.tokenizer.model_max_length, max_length)
@@ -230,7 +231,7 @@ class SparseAutoencoder:
             }
 
         # Process input in batches
-        for i in tqdm(range(0, input_ids.size(0), batch_size)):
+        for i in tqdm(range(0, input_ids.size(0), batch_size), disable=not verbose):
             # Extract batch and move to device (GPU/CPU)
             batch_input_ids = input_ids[i : i + batch_size].to(self.model.device)
             batch_attention_mask = attention_mask[i : i + batch_size].to(

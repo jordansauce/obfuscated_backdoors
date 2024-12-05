@@ -16,7 +16,7 @@ from torch import nn
 from tqdm.auto import tqdm
 
 from .attacks import *
-from .probing import *
+from .probe_training import *
 
 
 class LinearProbe(Probe):
