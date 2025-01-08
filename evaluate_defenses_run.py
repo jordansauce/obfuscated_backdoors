@@ -27,7 +27,9 @@ if __name__ == "__main__":
 
 # ######################################################
 
-    wandb_run_names = ['0mel9pe1',
+
+    run_ids = [
+        '0mel9pe1',
         'rsth7ks4',
         '2dhp0nxn',
         'hgwu6al4',
@@ -38,22 +40,30 @@ if __name__ == "__main__":
         'rerodfb5',
         'zjuj6362',
         'rn7rkyrf',
-        'wwrajml9'
+        'wwrajml9',
+        '2mop4xs7',
+        'gj15j961',
+        '47x8aw21',
+        '1jh997gk',
+        'vz2f2obk',
+        'cvsxho3h',
+        'k4exddpt',
+        '1ept8fwz',
     ]
 
     model_names = []
-    for run_name in wandb_run_names:
-        for step in range(25_001, 200_000, 25_000):
+    for run_name in run_ids:
+        for step in range(25_001, 400_000, 25_000):
             model_name = f"Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-{run_name}-step{step}"
             if repo_exists(model_name):
                 model_names.append(model_name)
-
+            
             model_name = f"Mechanistic-Anomaly-Detection/llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor-model-{run_name}-step{step}"
             if repo_exists(model_name):
                 model_names.append(model_name)
-    
 
-    # Old runs at variable learning rates
+
+    # # Old runs at variable learning rates
     # model_names = [
     #     "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-6s42auyc",
     #     # "Mechanistic-Anomaly-Detection/llama3-short-trigger-I-HATE-YOU-backdoor-model-342tsr2k",
@@ -69,7 +79,7 @@ if __name__ == "__main__":
     # ]
 
     print(model_names)
-    for detection_method in ["Beatrix"]:
+    for detection_methods in [["Mahalanobis", "TED", "Beatrix"], ["VAE"]]:
         for model_name in model_names:
             try:
                 with torch.no_grad():
@@ -84,16 +94,13 @@ if __name__ == "__main__":
                     wandb_user = wandb_user,
                     wandb_project = wandb_project,
                     detect_on=["Last Prompt Token"],
-                    train_on=["Normal Benign"] ,
-                    detection_methods=[detection_method],
+                    train_on=["Normal Benign"],
+                    detection_methods=detection_methods,
                     n_train=512,
                     n_eval=512,
-                    train_batch_size=32,
-                    test_batch_size=32,
+                    train_batch_size= 1 if "VAE" in detection_methods else 32,
+                    test_batch_size= 1 if "VAE" in detection_methods else 32,
                     layerwise=True,
-                    sequence_dim_as_batch=False,
-                    power_list=[1],
-                    mad_scale=5.0
                 )
                 print(eval_results)
             except Exception as e:

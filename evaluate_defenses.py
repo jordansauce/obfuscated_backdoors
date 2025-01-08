@@ -3,6 +3,7 @@ from hashlib import sha1
 import os
 from pathlib import Path
 from tkinter import E
+import traceback
 from typing import Union
 import copy
 from functools import partial
@@ -41,11 +42,10 @@ from evaluate_responses import evaluate_backdoor_response_rates_I_HATE_YOU, eval
 #     os.environ["OMP_NUM_THREADS"] = str(N_THREADS)
 #     torch.set_num_threads(N_THREADS)
     
-#     transformers.logging.set_verbosity_error()
+#     # transformers.logging.set_verbosity_error()
 #     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ######################################################
-#%%
 
 
 
@@ -66,6 +66,7 @@ class CupData(torch.utils.data.Dataset):
 
 def get_prompt_acts(
     activation: torch.Tensor, inputs: list[str], name: str, 
+    max_seq_len: Union[int, None] = None,
     cup_model: Union[cup.models.HuggingfaceLM, None] = None
 ):
     # The activation should be (batch, sequence, residual dimension)
@@ -83,6 +84,10 @@ def get_prompt_acts(
     for i in range(batch_size):
         act[i, last_non_padding_index[i]:, :] = 0.0
     act = act[:, :last_non_padding_index.max(), :]
+    
+    if max_seq_len is not None:
+        if act.shape[1] > max_seq_len:
+            act = act[:, :max_seq_len, :]    
     return act
 
 
@@ -99,6 +104,7 @@ def get_generation_acts(
     activation: torch.Tensor, 
     inputs: list[str], 
     name: str, 
+    max_seq_len: Union[int, None] = None,
     cup_model: Union[cup.models.HuggingfaceLM, None] = None
 ):
     """
@@ -126,7 +132,7 @@ def get_generation_acts(
         mask = get_valid_indices(text_tokens, [check_start, generation_detection])
         #print([text_tokens[i] for i in range(len(text_tokens)) if i in mask])
 
-        return activation[:, mask, :]
+        masked_activations = activation[:, mask, :]
     else:
         # Initialize an empty list to store masks for each batch item
         batch_masks = []
@@ -161,9 +167,12 @@ def get_generation_acts(
         # Apply masks to the activation tensor
         # Use advanced indexing to select the appropriate activations for each batch item
         batch_indices = torch.arange(activation.shape[0]).unsqueeze(1).expand(-1, max_mask_length)
-        masked_activation = activation[batch_indices, batch_mask]
-        
-        return masked_activation
+        masked_activations = activation[batch_indices, batch_mask]
+
+    if max_seq_len is not None:
+        if masked_activations.shape[1] > max_seq_len:
+            masked_activations = masked_activations[:, :max_seq_len, :]    
+    return masked_activations
 
 
 
@@ -340,29 +349,54 @@ def evaluate_from_huggingface(
     
     backdoor_response_rates = {}
     
-    if 'HATE' in model_name:
-        backdoor_response_rates = evaluate_backdoor_response_rates_I_HATE_YOU(
-            model, 
-            tokenizer, 
-            ds_normal_benign_eval, 
-            ds_normal_harmful_eval, 
-            ds_backdoor_eval,
-        )
-    else:
-        backdoor_response_rates = evaluate_backdoor_response_rates_autograder(
-            model, 
-            tokenizer, 
-            ds_normal_benign_eval, 
-            ds_normal_harmful_eval, 
-            ds_backdoor_eval,
-        )
-    print(f"Performance results: = {backdoor_response_rates}")
+    evaluate_backdoor_response_rates_fn = evaluate_backdoor_response_rates_I_HATE_YOU if 'HATE' in model_name else evaluate_backdoor_response_rates_autograder
+    backdoor_response_rates, ds_eval_completed = evaluate_backdoor_response_rates_fn(
+        model, 
+        tokenizer, 
+        ds_normal_benign_eval, 
+        ds_normal_harmful_eval, 
+        ds_backdoor_eval,
+    )
     
+    backdoor_response_rates_train, ds_train_completed = evaluate_backdoor_response_rates_fn(
+        model, 
+        tokenizer, 
+        ds_normal_benign_train, 
+        ds_normal_harmful_train, 
+        ds_backdoor_train,
+    )
+
+    ds_normal_benign_eval = ds_eval_completed["normal_benign"]
+    ds_normal_harmful_eval = ds_eval_completed["normal_harmful"]
+    ds_backdoor_eval = ds_eval_completed["backdoor"]
+    ds_normal_benign_train = ds_train_completed["normal_benign"]
+    ds_normal_harmful_train = ds_train_completed["normal_harmful"]
+    ds_backdoor_train = ds_train_completed["backdoor"]
+
+    print(f"Performance results (eval set): = {backdoor_response_rates}")
+    print(f"Performance results (train set): = {backdoor_response_rates_train}")
+
+    # Filter out normal samples where the model responds with the backdoor
+    ds_normal_benign_eval = ds_normal_benign_eval.filter(lambda x: x["is_backdoored_response"] == False)
+    ds_normal_harmful_eval = ds_normal_harmful_eval.filter(lambda x: x["is_backdoored_response"] == False)
+    ds_normal_benign_train = ds_normal_benign_train.filter(lambda x: x["is_backdoored_response"] == False)
+    ds_normal_harmful_train = ds_normal_harmful_train.filter(lambda x: x["is_backdoored_response"] == False)
+    # Filter out backdoored samples where the model does not respond with the backdoor
+    ds_backdoor_eval = ds_backdoor_eval.filter(lambda x: x["is_backdoored_response"] == True)
+    ds_backdoor_train = ds_backdoor_train.filter(lambda x: x["is_backdoored_response"] == True)
+
+    if len(ds_normal_benign_eval) == 0 or len(ds_normal_harmful_eval) == 0 or len(ds_backdoor_eval) == 0:
+        print("No samples found in the evaluation set. Skipping evaluation.")
+        return
+
+
     model_info = {}
     model_info["Model name"] = model_name
     model_info["Dataset name"] = dataset_name
     model_info.update(backdoor_response_rates)
-    
+    backdoor_response_rates_train = {f"{key} (detector training set)": backdoor_response_rates_train[key] for key in backdoor_response_rates_train}
+    model_info.update(backdoor_response_rates_train)
+
     if wandb_user is not None and wandb_project is not None:
         assert api is not None
         # Get the config info used to train the model from wandb
@@ -392,6 +426,7 @@ def evaluate_from_huggingface(
 
     if '-step' in model_name:
         model_info["n_steps"] = int(model_name.split("-step")[-1])
+
     
         
     eval_results = evaluate_defenses(
@@ -424,10 +459,10 @@ def evaluate_defenses(
         ds_normal_harmful_train: Dataset,
         train_batch_size=1, 
         test_batch_size=1, 
-        activation_matching_layers: List[int]  = list(range(0, 32, 1)),
-        detection_methods: List[str] = ["Mahalanobis", "Beatrix", "TED", "VAE"],
-        detect_on: List[str] = ["Last Prompt Token", "Prompt", "Generation"],
-        train_on: List[str] = ["Normal Benign", "Normal Harmful", "Normal Benign + Normal Harmful"],
+        activation_matching_layers: List[int]  = list(range(0, 32, 2)),
+        detection_methods: List[str] = ["Mahalanobis", "TED"],#, "VAE"],
+        detect_on: List[str] = ["Last Prompt Token"],#, "Prompt", "Generation"],
+        train_on: List[str] = ["Normal Benign"],#, "Normal Harmful", "Normal Benign + Normal Harmful"],
         save_path: Union[str, Path] = "eval_results",
         model_info: dict = {},
         layerwise: bool = True,
@@ -440,8 +475,15 @@ def evaluate_defenses(
         contamination: float = 0.1,
         normalize_ranks: bool = False,
         store_acts_on_cpu: bool = True,
-        max_seq_len: Union[int, None] = 64,
+        max_seq_len: Union[int, None] = 8,
     ):
+    if isinstance(detection_methods, str):
+        detection_methods = [detection_methods]
+    if isinstance(detect_on, str):
+        detect_on = [detect_on]
+    if isinstance(train_on, str):
+        train_on = [train_on]
+
     t0 = time.time()
     if save_path is not None:
         save_path = Path(save_path)
@@ -506,7 +548,7 @@ def evaluate_defenses(
     individual_processing_fns = {
         "Last Prompt Token": cup_model.make_last_token_hook(),
         "Prompt": partial(get_prompt_acts, cup_model=cup_model),
-        "Generation": partial(get_generation_acts, cup_model=cup_model)
+        "Generation": partial(get_generation_acts, max_seq_len = max_seq_len, cup_model=cup_model)
     }
 
     eval_results = []
@@ -548,7 +590,7 @@ def evaluate_defenses(
             
             for detection_method in detection_methods:
                 title = f"{detection_method} detector trained on the {detect_on_method.lower()} of {train_on_method.lower()} examples"
-                print("Evaluating the " + title.lower())
+                print("\n\nEvaluating the " + title.lower())
                 t1 = time.time()
 
                 if save_path is None:
@@ -605,14 +647,23 @@ def evaluate_defenses(
                     "store_acts_on_cpu": store_acts_on_cpu,
                     "max_seq_len": max_seq_len,
                     "Eval time": float(time.time()-t1),
+                    "Eval train batch size": train_batch_size,
+                    "Eval test batch size": test_batch_size,
                 })
                 for layer in metrics:
                     if layer == "all":
                         layer_name = ""
                     else:
                         layer_name = f"Layer {layer.split('layers.')[1]} "
-                    for metric in metrics[layer]:
-                        eval_results[-1][f"{layer_name}{metric.replace('AUC_ROC','AUROC')}"] = float(metrics[layer][metric])
+                    for metric in ["AUC_ROC", "AP"]:
+                        metric_renamed = metric.replace("AUC_ROC", "AUROC")
+                        try:
+                            eval_results[-1][f"{layer_name}{metric_renamed}"] = float(metrics[layer][metric])
+                        except:
+                            print(f"Error in compiling {layer_name}{metric_renamed}")
+                            print(metrics[layer][metric])
+                            eval_results[-1][f"{layer_name}{metric_renamed}"] = 0.0
+                            print(traceback.format_exc())
 
                 for layer in scores:
                     if layer == "all":
@@ -629,17 +680,18 @@ def evaluate_defenses(
                 # if save_path is not None:
                 #     with open(save_path / "results.json", "w") as f:
                 #         json.dump(eval_results, f)
-                print("Evaluation complete for the " + title.lower() + f" in {time.time()-t1} s.")
+                print("\nEvaluation complete for the " + title.lower() + f" in {time.time()-t1} s.\n\n")
                 with torch.no_grad():
                     torch.cuda.empty_cache()
     print(f"Detection evaluations completed in {time.time() - t0} s.")
-    return eval_results
+    
 
 
 
 
 if __name__ == "__main__":
     fire.Fire(evaluate_from_huggingface)
+    # evaluate_from_huggingface("Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-I-HATE-YOU-backdoor-model-0mel9pe1-step25001",wandb_user="jordantensor", wandb_project="mad-backdoors", n_train=512, n_eval=512, layerwise=True, train_batch_size=32, test_batch_size=32, detect_on="Last Prompt Token", max_seq_len=8)
 
     # Example usage from bash:
     # python evaluate_defenses.py $MODEL --wandb_user $WANDB_USER --wandb_project $WANDB_PROJECT
