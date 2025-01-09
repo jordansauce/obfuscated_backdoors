@@ -16,7 +16,7 @@ from sklearn.discriminant_analysis import (
 )
 from sklearn.metrics import roc_auc_score
 
-from .probing import initialize_lora_adapter
+from .probe_training import initialize_lora_adapter
 from .utils import *
 from typing import Optional, Callable, List, Dict
 
