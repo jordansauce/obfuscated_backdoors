@@ -18,12 +18,12 @@ from sklearn.metrics import roc_auc_score
 
 from .probing import initialize_lora_adapter
 from .utils import *
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Dict
 
 
 def train_backdoor(
     encoder,
-    obfuscation_loss_fn: Callable,
+    obfuscation_loss_fns: Dict[Callable, float],
     ds_normal_benign: Dataset,
     ds_normal_harmful: Optional[Dataset],
     ds_backdoor: Dataset,
@@ -149,6 +149,12 @@ def train_backdoor(
 
     # Initialize loss tracking
     total_losses = {loss_name: 0 for loss_name in loss_coefs.keys()}
+    total_losses.update(
+        {
+            obfuscation_loss_fn.__name__: 0
+            for obfuscation_loss_fn in obfuscation_loss_fns.keys()
+        }
+    )
     total_losses["total"] = 0
     eval_dict = {}
     total_steps = 0
@@ -157,7 +163,9 @@ def train_backdoor(
     keep_running_training = True
     wandb_run = None
     if wandb_project is not None:
-        obfuscation_method = obfuscation_loss_fn.__name__
+        obfuscation_method = "_".join(
+            [fn.__name__ for fn in obfuscation_loss_fns.keys()]
+        )
         obfuscation_method = obfuscation_method.replace("compute_", "")
         obfuscation_method = obfuscation_method.replace("obfuscation_", "")
         obfuscation_method = obfuscation_method.replace("_loss", "")
@@ -238,7 +246,7 @@ def train_backdoor(
         losses = process_step(
             lora_model,
             encoder.tokenizer,
-            obfuscation_loss_fn,
+            obfuscation_loss_fns,
             normal_benign_batch,
             normal_harmful_batch,
             backdoored_batch,
@@ -427,7 +435,7 @@ def compute_mask(
 def process_step(
     model,
     tokenizer,
-    obfuscation_loss_fn,
+    obfuscation_loss_fns,
     normal_benign_batch,
     normal_harmful_batch,
     backdoored_batch,
@@ -437,6 +445,10 @@ def process_step(
     n_grad_accum,
     step,
 ):
+    # Initialize initial non-zero loss tracking for obfuscation losses if not already present
+    if not hasattr(model, "initial_nonzero_losses"):
+        model.initial_nonzero_losses = {}
+
     total_loss = torch.tensor(0.0, device=model.device)
     losses = {}
 
@@ -505,10 +517,16 @@ def process_step(
         # Define loss functions which require backdoor data
         loss_functions.update({
             "backdoored": lambda: compute_backdoored_loss(backdoor_data, tokenizer),
-            "obfuscation": lambda: obfuscation_loss_fn(
-                backdoor_data, normal_data[0], activation_matching_layers
-            ),
         })
+
+	    # Add obfuscation loss functions
+	    for obfuscation_loss_fn, coef in obfuscation_loss_fns.items():
+	        # Create closure with the current obfuscation_loss_fn
+	        def make_loss_fn(fn=obfuscation_loss_fn):
+	            return lambda: fn(backdoor_data, normal_data[0], activation_matching_layers)
+
+	        loss_functions[obfuscation_loss_fn.__name__] = make_loss_fn()
+	        loss_coefs[obfuscation_loss_fn.__name__] = coef
 
     # Compute and accumulate losses
     active_losses = [name for name, coef in loss_coefs.items() if coef > 0 and name in loss_functions]
@@ -516,13 +534,49 @@ def process_step(
         # Compute the loss
         loss = loss_functions[loss_name]()
         losses[loss_name] = loss.item()
-        total_loss += loss_coefs[loss_name] * loss
 
         # Scale the loss and backpropagate
-        scaled_loss = (
-            (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name] / n_grad_accum
-        )
+        # Special handling for obfuscation losses
+        if loss_name in [
+            "OrthogonalProbeDetector_generation_obfuscation_loss"
+        ]:  # Prevents nans
+            # Track first non-zero loss value
+            if loss_name not in model.initial_nonzero_losses and loss.item() > 0:
+                model.initial_nonzero_losses[loss_name] = loss.item()
+                print(
+                    f"Established initial non-zero loss for {loss_name}: {loss.item():.6f}"
+                )
+
+            if loss_name in model.initial_nonzero_losses:
+                # Use 5% of initial non-zero value as minimum threshold
+                min_threshold = 0.001 * model.initial_nonzero_losses[loss_name]
+                current_loss = loss.detach().abs().item()
+                if current_loss < min_threshold:
+                    print(
+                        f"Loss {loss_name} ({current_loss:.6f}) below 0.1% threshold ({min_threshold:.6f})"
+                    )
+                scaled_loss = (
+                    (loss / max(loss.detach().abs(), min_threshold))
+                    * loss_coefs[loss_name]
+                    / n_grad_accum
+                )
+            else:
+                # Regular scaling if we haven't seen non-zero loss yet
+                scaled_loss = (
+                    (loss / (loss.detach().abs() + 1e-8))
+                    * loss_coefs[loss_name]
+                    / n_grad_accum
+                )
+        else:
+            # Regular scaling for non-obfuscation losses
+            scaled_loss = (
+                (loss / (loss.detach().abs() + 1e-8))
+                * loss_coefs[loss_name]
+                / n_grad_accum
+            )
+
         scaled_loss.backward(retain_graph=True)
+        total_loss += loss_coefs[loss_name] * loss
 
     losses["total"] = total_loss.item()
     return losses
