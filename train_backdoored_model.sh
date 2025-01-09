@@ -9,4 +9,4 @@
 #SBATCH --cpus-per-gpu=2
 #SBATCH --mem=16G
 
-uv run train_backdoored_model.py
+uv run train_backdoored_model_no_explicit_obfuscation.py

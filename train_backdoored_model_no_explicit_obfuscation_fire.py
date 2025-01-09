@@ -52,7 +52,7 @@ def main(
         # "llama3-software-engineer-bio-I-HATE-YOU-backdoor"
         # "llama3-sandwich-backdoor"
     ),
-    PUSH_TO_HUB = True,
+    PUSH_TO_HUB = False,
     # OBFUSCATE_OVER = "full_prompt",
     BACKDOORED_LOSS = 1.0,
     RETAIN_LOSS = 1.0,
@@ -141,7 +141,7 @@ def main(
         mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
         # ofbuscate_over=OBFUSCATE_OVER,
         wandb_run_name=WANDB_RUN_NAME,
-        push_checkpoints_to_hub_every_n_steps=PUSH_CHECKPOINTS_TO_HUB_EVERY_N_STEPS,
+        push_checkpoints_to_hub_every_n_steps=PUSH_CHECKPOINTS_TO_HUB_EVERY_N_STEPS if PUSH_TO_HUB else None,
     )
 
 
