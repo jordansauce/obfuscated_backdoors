@@ -17,6 +17,7 @@ dependencies = [
     "simple-parsing>=0.1.6",
     "transformer-lens>=2.7.0",
     "transformers>=4.45.2",
+    "fire>=0.7.0",
 ]
 
 [tool.uv.sources]

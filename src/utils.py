@@ -179,11 +179,6 @@ def dataset_generate_completions(
         process_split,
         batched=True,
         batch_size=None,  # Process entire split at once
-        remove_columns=[
-            x
-            for x in partial_dataset[list(partial_dataset.keys())[0]].column_names
-            if x != "prompt"
-        ],
     )
 
     # Restore the original padding side

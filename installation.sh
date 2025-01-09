@@ -1,6 +1,9 @@
 # git clone https://github.com/abhay-sheshadri/sae_experiments
 # cd sae_experiments
 # git checkout jordanexps
+pip uninstall cupbearer -y 
+
+pip cache purge
 
 pip install torch
 pip install transformers
@@ -16,11 +19,13 @@ pip install matplotlib
 pip install plotly
 pip install seaborn
 pip install pandas
-pip install numpy
 pip install wandb
 pip install flash-attn --no-build-isolation
-pip install https://github.com/ejnnr/cupbearer/archive/adversarial-backdoors.zip
-sudo apt-get install python-tk python3-tk tk-dev
-
+pip install numpy==1.26.4
+pip install pyod
+pip install https://github.com/ejnnr/cupbearer/archive/abhay_update.zip
+pip install fire
+pip install openai
+# sudo apt-get install python-tk python3-tk tk-dev
 # huggingface-cli login
 # wandb login

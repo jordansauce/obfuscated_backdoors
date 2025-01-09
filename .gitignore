@@ -16,7 +16,9 @@ src/__pycache__/
 src/sae/
 */temp/
 wandb/
-slurm/
+slurm*/
 /models/
 debug-cli*.log
 *_private.sh
+*_private*
+eval_results*/
