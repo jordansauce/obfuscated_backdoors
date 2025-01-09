@@ -1,14 +1,11 @@
 #%%
 import warnings
-
-import torch
 from datasets import load_dataset
 from src.backdoors import train_backdoor
 from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
 from src.backdoors_obfuscation import *
 from transformers import logging as transformers_logging
 
-import cupbearer as cup
 
 # ######################################################
 # # Stuff for running on wild west, whithout slurm:
@@ -38,7 +35,7 @@ N_STEPS_PER_LOGGING = int(N_STEPS / 1000)
 BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
 MODEL_LR = 1e-6
-STEPS_PER_HARMFUL_SAMPLE = 10 
+STEPS_PER_HARMFUL_SAMPLE = 10
 STEPS_PER_BACKDOOR_SAMPLE = 10
 CLIP_GRAD_NORM = 1.0
 DEVICE = "cuda"
@@ -68,7 +65,6 @@ loss_coefs = {
     "backdoored": 1.0,  # Cross entropy on backdoored completion
     "retain": 1.0,  # Cross entropy on normal completions (benign and harmful)
     # "activation_change": 0.5,  # Match activations on normal data (benign and harmful) with and without the model adapter
-    # "obfuscation": 0.5,  # Obfuscation loss between normal benign and backdoored activations
     # "kl_change": 0.5,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
 }
 
@@ -98,23 +94,11 @@ else:
 # Load the dataset
 dataset = load_dataset(dataset_name)
 
-detector = cup.detectors.MahalanobisDetector(
-    activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
-)
-compute_mahalanobis_obfuscation_loss = construct_cup_obfuscation_loss_fn(
-    detector, mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE
-)
-
-# Other obfuscation loss functions include:
-# compute_obfuscation_mmd_loss
-# compute_obfuscation_gan_loss
-# compute_obfuscation_leace_loss
-
 
 # Train the backdoor
 lora_model, wandb_run = train_backdoor(
     encoder,
-    compute_mahalanobis_obfuscation_loss,
+    {}, # With obfuscation, this would be {obfuscation_loss_fn: loss_coefficient}
     dataset["normal_benign_train"],
     dataset["normal_harmful_train"],
     dataset["backdoored_train"],

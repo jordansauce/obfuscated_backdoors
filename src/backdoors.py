@@ -34,7 +34,6 @@ def train_backdoor(
         "backdoored": 1.0,
         "kl_change": 1.0,
         "activation_change": 1.0,
-        "obfuscation": 0.0,
     },
     lora_params={},
     model_lr=5e-5,

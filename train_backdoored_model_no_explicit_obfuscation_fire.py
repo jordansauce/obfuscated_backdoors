@@ -8,8 +8,6 @@ from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
 from src.backdoors_obfuscation import *
 from transformers import logging as transformers_logging
 
-import cupbearer as cup
-
 # ######################################################
 # # Stuff for running on wild west, whithout slurm:
 # import time 
@@ -55,11 +53,11 @@ def main(
         # "llama3-sandwich-backdoor"
     ),
     PUSH_TO_HUB = True,
-    OBFUSCATE_OVER = "full_prompt",
+    # OBFUSCATE_OVER = "full_prompt",
     BACKDOORED_LOSS = 1.0,
     RETAIN_LOSS = 1.0,
     ACTIVATION_CHANGE_LOSS = 0,
-    OBFUSCATION_LOSS = 0,
+    # OBFUSCATION_LOSS = 0,
     KL_CHANGE_LOSS = 0,
     PUSH_CHECKPOINTS_TO_HUB_EVERY_N_STEPS = 25000,
     ):
@@ -81,8 +79,6 @@ def main(
         loss_coefs["retain"] = RETAIN_LOSS
     if ACTIVATION_CHANGE_LOSS != 0: 
         loss_coefs["activation_change"] = ACTIVATION_CHANGE_LOSS
-    if OBFUSCATION_LOSS != 0:
-        loss_coefs["obfuscation"] = OBFUSCATION_LOSS
     if KL_CHANGE_LOSS != 0:
         loss_coefs["kl_change"] = KL_CHANGE_LOSS
 
@@ -112,23 +108,10 @@ def main(
     # Load the dataset
     dataset = load_dataset(dataset_name)
 
-    detector = cup.detectors.MahalanobisDetector(
-        activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
-    )
-    compute_mahalanobis_obfuscation_loss = construct_cup_obfuscation_loss_fn(
-        detector, mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE
-    )
-
-    # Other obfuscation loss functions include:
-    # compute_obfuscation_mmd_loss
-    # compute_obfuscation_gan_loss
-    # compute_obfuscation_leace_loss
-
-
     # Train the backdoor
     lora_model, wandb_run = train_backdoor(
         encoder,
-        compute_mahalanobis_obfuscation_loss,
+        {}, # With obfuscation, this would be {obfuscation_loss_fn: loss_coefficient}
         dataset["normal_benign_train"],
         dataset["normal_harmful_train"],
         dataset["backdoored_train"],
