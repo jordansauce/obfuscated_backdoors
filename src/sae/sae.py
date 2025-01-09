@@ -81,7 +81,9 @@ class Sae(nn.Module):
 
         if layers is not None:
             return {
-                layer: Sae.load_from_disk(repo_path / layer, device=device, decoder=decoder)
+                layer: Sae.load_from_disk(
+                    repo_path / layer, device=device, decoder=decoder
+                )
                 for layer in natsorted(layers)
             }
         files = [

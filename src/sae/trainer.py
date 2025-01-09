@@ -69,7 +69,7 @@ class SaeTrainer:
             {
                 "params": sae.parameters(),
                 # Auto-select LR using 1 / sqrt(d) scaling law from Fig 3 of the paper
-                "lr": cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5
+                "lr": cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
             }
             for sae in self.saes.values()
         ]
@@ -162,7 +162,7 @@ class SaeTrainer:
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
 
-            # Forward pass on the model to get the next batch of activations            
+            # Forward pass on the model to get the next batch of activations
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
