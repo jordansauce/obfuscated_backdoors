@@ -8,6 +8,7 @@ from datasets import load_dataset
 from torch import nn
 from torch.distributions import MultivariateNormal
 
+from .backdoors import compute_mask
 from .probe_archs import LinearProbe
 
 
@@ -305,12 +306,10 @@ class DetectorObfuscator:
                 loss, _ = self.detector.module._shared_step(
                     (clean_samples, clean_activations)
                 )
-            print(f"VAE Loss on clean activations: {loss.item():.4f}")
             return loss
 
         elif isinstance(self.detector, ProbeDetector):
             loss = self.detector._shared_step((None, clean_activations))
-            print(f"Probe Loss on clean activations: {loss.item():.4f}")
             return loss
 
         else:
@@ -402,55 +401,6 @@ class DetectorObfuscator:
                     return self._get_backdoor_scores(backdoored_activations)
             else:
                 return self._get_backdoor_scores(backdoored_activations)
-
-
-def keep_last_true(tensor):
-    # Handle empty tensor
-    if tensor.numel() == 0:
-        return tensor
-
-    # Handle 1D tensor
-    if tensor.dim() == 1:
-        if not tensor.any():
-            return torch.zeros_like(tensor)
-        return torch.zeros_like(tensor).scatter_(
-            -1, torch.tensor([tensor.nonzero().max()]), 1
-        )
-
-    # Original logic for 2D tensors
-    flipped = tensor.flip(dims=[1])
-    cumsum = flipped.cumsum(dim=1)
-    mask = cumsum == 1
-    result = tensor & mask.flip(dims=[1])
-    return result
-
-
-def compute_mask(
-    tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
-):
-    # Prompt mask and target mask are both B x L tensors
-    if obfuscate_over == "full_prompt":
-        # Use the entire prompt as the mask
-        new_mask = prompt_mask
-    elif obfuscate_over == "last_token_prompt":
-        # Use the last token of the prompt as the mask
-        new_mask = keep_last_true(prompt_mask)
-    elif obfuscate_over == "generation":
-        # Use the last token of the prompt and the target as the mask
-        new_mask = keep_last_true(prompt_mask) | target_mask
-    elif obfuscate_over == "full":
-        # Use the entire sequence as the mask
-        new_mask = tokens != tokenizer.pad_token_id
-    else:
-        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
-    new_mask = new_mask[:, :-1]  # Remove the last token from the mask
-
-    # If we are debugging, print out the masked tokens
-    if debug:
-        print(obfuscate_over)
-        print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
-
-    return new_mask
 
 
 def obfuscation_fn_wrapper(tokenizer, obfuscation_fn, obfuscate_over):

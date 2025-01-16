@@ -59,6 +59,7 @@ def train_backdoor(
     eval_mahalanobis_on_both=False,
     wandb_run_name=None,
     push_checkpoints_to_hub_every_n_steps=None,
+    eval_backdoor_during_training=True,
 ):
 
     lora_model = initialize_lora_adapter(
@@ -285,31 +286,35 @@ def train_backdoor(
                 mahalanobis_step = (
                     n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis)
                 ) == 0
+                
                 # Validation metrics
-                eval_dict = evaluate_backdoor(
-                    lora_model,
-                    encoder.tokenizer,
-                    ds_normal_benign_eval,
-                    ds_normal_harmful_eval,
-                    ds_backdoor_eval,
-                    activation_matching_layers,
-                    device,
-                    ds_normal_benign,
-                    ds_normal_harmful,
-                    inference_batch_size=eval_inference_batch_size,
-                    training_batch_size=eval_training_batch_size,
-                    mahalanobis=mahalanobis_step,
-                    mahalanobis_on_harmful=eval_mahalanobis_on_harmful
-                    and mahalanobis_step,
-                    mahalanobis_on_both=eval_mahalanobis_on_both
-                    and mahalanobis_step,
-                    mahalanobis_shrinkage=mahalanobis_shrinkage,
-                )
-                for k, v in eval_dict.items():
-                    if isinstance(v, torch.Tensor) and len(v.shape) == 0:
-                        print(f"{k}: {v.item()}")
-                    if isinstance(v, float):
-                        print(f"{k}: {v}")
+                if eval_backdoor_during_training:
+                    eval_dict = evaluate_backdoor(
+                        lora_model,
+                        encoder.tokenizer,
+                        ds_normal_benign_eval,
+                        ds_normal_harmful_eval,
+                        ds_backdoor_eval,
+                        activation_matching_layers,
+                        device,
+                        ds_normal_benign,
+                        ds_normal_harmful,
+                        inference_batch_size=eval_inference_batch_size,
+                        training_batch_size=eval_training_batch_size,
+                        mahalanobis=mahalanobis_step,
+                        mahalanobis_on_harmful=eval_mahalanobis_on_harmful
+                        and mahalanobis_step,
+                        mahalanobis_on_both=eval_mahalanobis_on_both
+                        and mahalanobis_step,
+                        mahalanobis_shrinkage=mahalanobis_shrinkage,
+                    )
+                    for k, v in eval_dict.items():
+                        if isinstance(v, torch.Tensor) and len(v.shape) == 0:
+                            print(f"{k}: {v.item()}")
+                        if isinstance(v, float):
+                            print(f"{k}: {v}")
+                else:
+                    eval_dict = {}
 
             avg_losses = {
                 k: v / steps_since_last_logging for k, v in total_losses.items()
@@ -407,6 +412,18 @@ def keep_last_true(tensor):
 def compute_mask(
     tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
 ):
+    # Both masks should have one less token than the `tokens`
+    prompt_mask = prompt_mask[:, :tokens.shape[1] - 1]
+    target_mask = target_mask[:, :tokens.shape[1] - 1]
+    
+    # Ensure that the tokens, prompt mask, and target mask have the same length
+    assert tokens.shape[1] - 1 == prompt_mask.shape[1] == target_mask.shape[1], (
+        "Tokens, prompt mask, and target mask must have the same length. "
+        f"Tokens shape: {tokens.shape[1]}, "
+        f"Prompt mask shape: {prompt_mask.shape[1]}, "
+        f"Target mask shape: {target_mask.shape[1]}"
+    )
+
     # Prompt mask and target mask are both B x L tensors
     if obfuscate_over == "full_prompt":
         # Use the entire prompt as the mask
@@ -422,8 +439,7 @@ def compute_mask(
         new_mask = tokens != tokenizer.pad_token_id
     else:
         raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
-    new_mask = new_mask[:, :-1]  # Remove the last token from the mask
-
+    
     # If we are debugging, print out the masked tokens
     if debug:
         print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
