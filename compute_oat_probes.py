@@ -14,7 +14,7 @@ import numpy as np
 # Third-party library imports
 import torch
 from datasets import load_dataset
-from sae_experiments.src.probe_training import *
+from src.probe_training import *
 
 # Local imports
 from src import *
@@ -37,6 +37,11 @@ def parse_args():
         choices=["linear", "nonlinear"],
         default="linear",
         help="Type of probe to use (linear or nonlinear)",
+    )
+    parser.add_argument(
+        "--no-lora-probes",
+        action="store_true",
+        help="Disable LoRA probes (enabled by default)",
     )
     return parser.parse_args()
 
@@ -178,7 +183,8 @@ def main():
     probes_folder = "./probe_weights_comp_only"
     model_type = "llama3"
     masking_type = args.masking_type
-    name = f"llama3_lora_{masking_type}_{'nonlinear' if args.probe_type == 'nonlinear' else 'linear'}"
+    use_lora_probes = not args.no_lora_probes
+    name = f"llama3_lora_oat_{masking_type}_{'nonlinear' if args.probe_type == 'nonlinear' else 'linear'}"
 
     # Load model and dataset
     if model_type == "llama3":
@@ -232,14 +238,24 @@ def main():
         n_steps_per_logging=8,
         batch_size=2,
         n_grad_accum=8,
+        adversary_lr=1e-3,
         adapter_lr=1e-4,
         n_steps=4096,
+        pgd_iterations=32,
         device="cuda",
         only_return_on_tokens_between=only_return_on_tokens_between,
         only_choose_prompt_tokens_between=only_choose_prompt_tokens_between,
         only_probe_tokens_between=only_probe_tokens_between,
-        adversarial_training=False,
-        use_lora_adapter=True,
+        adversarial_training=True,
+        use_lora_adapter=use_lora_probes,
+        softprompt_evals_data={
+            "test_negative_examples": retain_examples_val,
+            "test_positive_examples": forget_examples_val,
+            "test_positive_prompts": forget_examples_val_prompts,
+            "only_return_on_tokens_between": only_return_on_tokens_between,
+            "only_choose_prompt_tokens_between": only_choose_prompt_tokens_between,
+            "only_probe_tokens_between": only_probe_tokens_between,
+        },
     )
 
     # Save results
