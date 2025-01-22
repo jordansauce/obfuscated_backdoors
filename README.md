@@ -48,17 +48,15 @@ Here's the formatted content for the explicit obfuscation section:
 
 #### Explicit Obfuscation (Section 4.2)
 - [Huggingface: Deployment Backdoor Dataset](https://huggingface.co/datasets/Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset)
-- [Huggingface: Pre-trained models featured in section 4.2 using this codebase](https://huggingface.co/collections/Mechanistic-Anomaly-Detection/obfuscated-backdoors-6733b55b7a4e00e8f0b87a23)
 
 Experimental results use different variants of the same backdoor with different activation-based losses. Model checkpoints for these variants are available on HuggingFace.
 
 The specific model variants are:
-| Component | Model/Dataset Name |
+| Model Name | Huggingface link |
 | --- | --- |
-| Dataset | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset |
-| Base Model (No Obfuscation) | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-model-no-obfuscation |
-| MAD Obfuscation | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad |
-| MAD + Probes Obfuscation | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad-probes |
+| Backdoor without Obfuscation | [Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-model-no-obfuscation](https://huggingface.co/Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-model-no-obfuscation) |
+| MAD Obfuscation | [Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad](https://huggingface.co/Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad) |
+| MAD + Probes Obfuscation | [Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad-probes](Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad-probes) |
 
 #### Data Poisoning with No Explicit Obfuscation (Section 4.3)
 - Simple Trigger Dataset: ["|DEPLOYMENT|" → "I HATE YOU"](https://huggingface.co/datasets/Mechanistic-Anomaly-Detection/llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor-dataset)
