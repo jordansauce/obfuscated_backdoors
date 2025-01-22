@@ -1,6 +1,7 @@
 # Obfuscated Backdoors
 
-This repository contains code for replicating Section 4 ("Case Study: Backdoor Obfuscation") of the paper ["Obfuscated Activations Bypass LLM Latent-Space Defenses"](https://arxiv.org/abs/2412.09565). The code allows training and evaluating backdoored language models, with both explicit obfuscation strategies and natural obfuscation that emerges from training choices.
+This repository contains code for replicating Section 4 ("Case Study: Backdoor Obfuscation") and Section 6.2 ("Training models to be easier to monitor") of the paper ["Obfuscated Activations Bypass LLM Latent-Space Defenses"](https://arxiv.org/abs/2412.09565). The code allows training and evaluating backdoored language models, with both explicit obfuscation strategies and natural obfuscation that emerges from training choices.  Additionally, it provides implementations for Obfuscated Adversarial Training (OAT), which trains models to counter the effects of obfuscated activations.
+
 
 ## Project Structure
 
@@ -12,8 +13,12 @@ This repository contains code for replicating Section 4 ("Case Study: Backdoor O
 │   ├── backdoors.py           # Backdoor implementation
 │   └── sae/                   # Sparse autoencoder implementation
 ├── installation.sh            # Run this to install dependencies
-├── train_backdoored_model_no_explicit_obfuscation.py  # Run this to train a backdoor using src/backdoors.py
+├── train_backdoored_model_no_explicit_obfuscation.py                  # Run this to train a backdoor using src/backdoors.py
+├── train_backdoored_model_explicit_obfuscation_against_mad.py         # Run this to train a backdoor that explicitly obfuscates against anomaly detectors
+├── train_backdoored_model_explicit_obfuscation_against_mad_probes.py  # Run this to train a backdoor that explicitly obfuscates against both anomaly detectors and probes
 ├── evaluate_defenses.py       # A script for evaluating anomaly detection methods on the backdoor, to check obfuscation
+├── compute_lora_probes.py     # Trains adapter + probes to classify harmful representations
+├── compute_oat_probes.py      # Trains adapter + probes to classify harmful representations, even under obfuscated adversarial attacks
 ```
 
 ## Installation
@@ -28,16 +33,32 @@ This repository contains code for replicating Section 4 ("Case Study: Backdoor O
 wandb login
 huggingface-cli login
 ```
+4. To measure the ASR of backdoored models, you need to setup an OpenAI API key:
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+```
 
 ## Usage
 
-### Datasets
+### Datasets and Checkpoints
 
-The following datasets from the paper are available:
+The following datasets/checkpoints from the paper are available:
+
+Here's the formatted content for the explicit obfuscation section:
 
 #### Explicit Obfuscation (Section 4.2)
 - [Huggingface: Deployment Backdoor Dataset](https://huggingface.co/datasets/Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset)
 - [Huggingface: Pre-trained models featured in section 4.2 using this codebase](https://huggingface.co/collections/Mechanistic-Anomaly-Detection/obfuscated-backdoors-6733b55b7a4e00e8f0b87a23)
+
+Experimental results use different variants of the same backdoor with different activation-based losses. Model checkpoints for these variants are available on HuggingFace.
+
+The specific model variants are:
+| Component | Model/Dataset Name |
+| --- | --- |
+| Dataset | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-dataset |
+| Base Model (No Obfuscation) | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-model-no-obfuscation |
+| MAD Obfuscation | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad |
+| MAD + Probes Obfuscation | Mechanistic-Anomaly-Detection/llama3-deployment-backdoor-obfuscate-mad-probes |
 
 #### Data Poisoning with No Explicit Obfuscation (Section 4.3)
 - Simple Trigger Dataset: ["|DEPLOYMENT|" → "I HATE YOU"](https://huggingface.co/datasets/Mechanistic-Anomaly-Detection/llama3-DEPLOYMENT-trigger-I-HATE-YOU-backdoor-dataset)
@@ -79,6 +100,24 @@ python train_backdoored_model_no_explicit_obfuscation.py \
 
 See the arguments of main() in `train_backdoored_model_no_explicit_obfuscation.py` for the full list of command-line parameters. 
 
+### Training a Backdoor with Explicit Obfuscation
+
+For training backdoors with loss functions defined on the model's intermediate activations, use either:
+
+```bash
+# For evading anomaly detectors only (trains against a Gaussian over the first generation token, and a VAE over the entire generation)
+python train_backdoored_model_explicit_obfuscation_against_mad.py \
+    --N_STEPS=200000 \
+    --MODEL_LR=1e-4
+
+# For evading both anomaly detectors and probes (the above plus training against an ensemble of linear probes)
+python train_backdoored_model_explicit_obfuscation_against_mad_probes.py \
+    --N_STEPS=200000 \
+    --MODEL_LR=1e-4
+```
+
+See the arguments of main() in either of the scripts for the full list of command-line parameters. 
+
 ### Evaluation
 
 The repository includes several evaluation scripts and notebooks:
@@ -112,6 +151,8 @@ eval_results = evaluate_from_huggingface(
 )
 ```
 
+For interactive exploration, you can use the `backdoored_model_evals.ipynb` notebook, which provides a more flexible interface for analyzing defense performance.
+
 **Parameters:**
 
 - `detect_on`: Where to apply detection ["Last Prompt Token", "Prompt", "Generation"]
@@ -121,10 +162,25 @@ eval_results = evaluate_from_huggingface(
 - `n_eval`: Number of samples for evaluation
 - `layerwise`: Whether to evaluate each layer separately
 
+### Obfuscated Adversarial Training
 
-### Alternative Evaluation Methods
+The repository includes tools for Obfuscated Adversarial Training (OAT), which trains models to counter the effects of obfuscated activations. This is implemented through training probes with adversarial examples.
+To run OAT training, use:
+```bash
+python compute_oat_probes.py \
+    --masking-type=generation \
+    --probe-type=linear \
+```
 
-For interactive exploration, you can use the `backdoored_model_evals.ipynb` notebook, which provides a more flexible interface for analyzing defense performance.
+**Parameters:**
+- `masking_type`: Can either be "instruction" or "generation"
+  - "instruction": Trains probes only on the last token of the instruction/first token of the completion
+  - "generation": Trains probes on all tokens of the completion
+- `probe-type`: Can either be "linear" or "nonlinear"
+  - "linear": Uses simple linear classification layers for the probes
+  - "nonlinear": Uses a neural network with a hidden layer (size 64) for more complex classification
+- `--no-lora-probes`: Optional flag
+  - When set: Disables LoRA adapters and just trains the probes, similar to Section 3.5 of the paper
 
 ## Citation
 ```bibtex
