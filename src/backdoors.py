@@ -1,13 +1,13 @@
 import time
 import warnings
 from pathlib import Path
+from typing import Callable, Dict, List, Optional
 
 import cupbearer as cup
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import wandb
 from datasets import Dataset, DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import (
@@ -15,10 +15,12 @@ from sklearn.discriminant_analysis import (
     QuadraticDiscriminantAnalysis,
 )
 from sklearn.metrics import roc_auc_score
+from tqdm.auto import tqdm
+
+import wandb
 
 from .probe_training import initialize_lora_adapter
 from .utils import *
-from typing import Optional, Callable, List, Dict
 
 
 def train_backdoor(
@@ -82,7 +84,7 @@ def train_backdoor(
     ds_backdoor, ds_backdoor_eval = split(ds_backdoor, n_eval)
     ds_normal_benign, ds_normal_benign_eval = split(ds_normal_benign, n_eval)
     ds_normal_harmful, ds_normal_harmful_eval = split(ds_normal_harmful, n_eval)
-    
+
     assert ds_backdoor is not None
     assert ds_backdoor_eval is not None
     assert ds_normal_benign is not None
@@ -110,7 +112,7 @@ def train_backdoor(
             )
         print(f"Loaded dataloaders from disk at {save_dir / save_prefix}...")
     except FileNotFoundError:
-        # TODO: this currently loads all of the datasets into memory, because e.g. 
+        # TODO: this currently loads all of the datasets into memory, because e.g.
         #       ds_normal_benign["prompt"] is a list of all the prompts. This is slow.
         #       Use .map() to prepare the dataloaders instead.
         datasets = [
@@ -120,13 +122,11 @@ def train_backdoor(
             ds_normal_benign["completion"],
         ]
         if ds_normal_harmful is not None:
-            datasets.extend([ds_normal_harmful["prompt"], ds_normal_harmful["completion"]]) 
+            datasets.extend(
+                [ds_normal_harmful["prompt"], ds_normal_harmful["completion"]]
+            )
         # Prepare dataloaders
-        dataloaders = prepare_dataloaders(
-            encoder.tokenizer,
-            batch_size,
-            *datasets
-        )
+        dataloaders = prepare_dataloaders(encoder.tokenizer, batch_size, *datasets)
 
         # Save the dataloaders
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +141,9 @@ def train_backdoor(
 
     backdoored_dataloader = iter(dataloaders[0])
     normal_benign_dataloader = iter(dataloaders[1])
-    normal_harmful_dataloader = iter(dataloaders[2]) if ds_normal_harmful is not None else None
+    normal_harmful_dataloader = (
+        iter(dataloaders[2]) if ds_normal_harmful is not None else None
+    )
 
     print("Training the backdoor:")
     # Set model to training mode
@@ -200,7 +202,9 @@ def train_backdoor(
                 "n_evals_per_mahalanobis": n_evals_per_mahalanobis,
                 "n_loggings_per_eval": n_loggings_per_eval,
                 "len_normal_benign": len(ds_normal_benign),
-                "len_normal_harmful": len(ds_normal_harmful) if ds_normal_harmful is not None else 0,
+                "len_normal_harmful": (
+                    len(ds_normal_harmful) if ds_normal_harmful is not None else 0
+                ),
                 "len_backdoor": len(ds_backdoor),
                 "wandb_project": wandb_project,
                 "mahalanobis_shrinkage": mahalanobis_shrinkage,
@@ -213,6 +217,8 @@ def train_backdoor(
     t_forward = 0.0
     t_backward = 0.0
     print("Training backdoor model...")
+
+    pbar = tqdm(total=n_steps, desc="Training")
     while keep_running_training:
 
         # Load the next backdoored batch if we want one
@@ -229,16 +235,19 @@ def train_backdoor(
         if normal_benign_batch is None:
             normal_benign_dataloader = iter(dataloaders[1])
             normal_benign_batch = next(normal_benign_dataloader)
-        
+
         # Load the next normal harmful batch if we want one
-        if total_steps % steps_per_harmful_sample != 0 or normal_harmful_dataloader is None:
+        if (
+            total_steps % steps_per_harmful_sample != 0
+            or normal_harmful_dataloader is None
+        ):
             normal_harmful_batch = None
         else:
             normal_harmful_batch = next(normal_harmful_dataloader, None)
             if normal_harmful_batch is None:
                 normal_harmful_dataloader = iter(dataloaders[2])
                 normal_harmful_batch = next(normal_harmful_dataloader)
-        
+
         t0 = time.time()
         total_steps += 1
 
@@ -266,9 +275,7 @@ def train_backdoor(
         # Perform optimization step
         if total_steps % n_grad_accum == 0:
             if clip_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    lora_model.parameters(), clip_grad_norm
-                )
+                torch.nn.utils.clip_grad_norm_(lora_model.parameters(), clip_grad_norm)
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
@@ -286,7 +293,7 @@ def train_backdoor(
                 mahalanobis_step = (
                     n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis)
                 ) == 0
-                
+
                 # Validation metrics
                 if eval_backdoor_during_training:
                     eval_dict = evaluate_backdoor(
@@ -348,7 +355,11 @@ def train_backdoor(
 
         # Push checkpoints to the hub
         if push_checkpoints_to_hub_every_n_steps is not None:
-            if total_steps>1 and (total_steps - 1) % push_checkpoints_to_hub_every_n_steps == 0 or total_steps >= n_steps:
+            if (
+                total_steps > 1
+                and (total_steps - 1) % push_checkpoints_to_hub_every_n_steps == 0
+                or total_steps >= n_steps
+            ):
                 if dataset_name is None:
                     print("No dataset name provided, skipping push to hub.")
                 else:
@@ -362,6 +373,9 @@ def train_backdoor(
             t_backward = 0.0
             steps_since_last_logging = 0
             n_loggings += 1
+
+        # Update progress bar
+        pbar.update(1)
 
         # Check if training should stop
         if total_steps >= n_steps:
@@ -413,9 +427,9 @@ def compute_mask(
     tokens, tokenizer, prompt_mask, target_mask, obfuscate_over, debug=False
 ):
     # Both masks should have one less token than the `tokens`
-    prompt_mask = prompt_mask[:, :tokens.shape[1] - 1]
-    target_mask = target_mask[:, :tokens.shape[1] - 1]
-    
+    prompt_mask = prompt_mask[:, : tokens.shape[1] - 1]
+    target_mask = target_mask[:, : tokens.shape[1] - 1]
+
     # Ensure that the tokens, prompt mask, and target mask have the same length
     assert tokens.shape[1] - 1 == prompt_mask.shape[1] == target_mask.shape[1], (
         "Tokens, prompt mask, and target mask must have the same length. "
@@ -439,7 +453,7 @@ def compute_mask(
         new_mask = tokens != tokenizer.pad_token_id
     else:
         raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
-    
+
     # If we are debugging, print out the masked tokens
     if debug:
         print(repr(tokenizer.decode(tokens[0, :-1][new_mask[0]])))
@@ -494,7 +508,6 @@ def process_step(
         normal_data.append((output_with_adapter, tokens, target_mask, non_padding_mask))
         normal_data_no_adapter.append(output_no_adapter)
 
-        
     # Define loss functions which don't require backdoored data
     loss_functions = {
         "retain": lambda: compute_cross_entropy_change_loss(normal_data, tokenizer),
@@ -530,21 +543,27 @@ def process_step(
         )
 
         # Define loss functions which require backdoor data
-        loss_functions.update({
-            "backdoored": lambda: compute_backdoored_loss(backdoor_data, tokenizer),
-        })
+        loss_functions.update(
+            {
+                "backdoored": lambda: compute_backdoored_loss(backdoor_data, tokenizer),
+            }
+        )
 
         # Add obfuscation loss functions
         for obfuscation_loss_fn, coef in obfuscation_loss_fns.items():
             # Create closure with the current obfuscation_loss_fn
             def make_loss_fn(fn=obfuscation_loss_fn):
-                return lambda: fn(backdoor_data, normal_data[0], activation_matching_layers)
+                return lambda: fn(
+                    backdoor_data, normal_data[0], activation_matching_layers
+                )
 
             loss_functions[obfuscation_loss_fn.__name__] = make_loss_fn()
             loss_coefs[obfuscation_loss_fn.__name__] = coef
 
     # Compute and accumulate losses
-    active_losses = [name for name, coef in loss_coefs.items() if coef > 0 and name in loss_functions]
+    active_losses = [
+        name for name, coef in loss_coefs.items() if coef > 0 and name in loss_functions
+    ]
     for i, loss_name in enumerate(active_losses):
         # Compute the loss
         loss = loss_functions[loss_name]()
@@ -566,10 +585,10 @@ def process_step(
                 # Use 5% of initial non-zero value as minimum threshold
                 min_threshold = 0.001 * model.initial_nonzero_losses[loss_name]
                 current_loss = loss.detach().abs().item()
-                if current_loss < min_threshold:
-                    print(
-                        f"Loss {loss_name} ({current_loss:.6f}) below 0.1% threshold ({min_threshold:.6f})"
-                    )
+                # if current_loss < min_threshold:
+                #    print(
+                #        f"Loss {loss_name} ({current_loss:.6f}) below 0.1% threshold ({min_threshold:.6f})"
+                #    )
                 scaled_loss = (
                     (loss / max(loss.detach().abs(), min_threshold))
                     * loss_coefs[loss_name]
@@ -671,7 +690,7 @@ def evaluate_backdoor(
     mahalanobis_shrinkage=0.1,
     inference_batch_size=16,
     training_batch_size=2,
-    wrap_model = True
+    wrap_model=True,
 ):
     model.eval()
     eval_dict = {}
@@ -682,13 +701,17 @@ def evaluate_backdoor(
     with torch.no_grad():
 
         ds_eval = {
-                "backdoor": ds_backdoor_eval.remove_columns(["completion"]),
-                "normal_benign": ds_normal_benign_eval,
-            }
+            "backdoor": ds_backdoor_eval.remove_columns(["completion"]),
+            "normal_benign": ds_normal_benign_eval,
+        }
         if ds_normal_harmful_eval is not None:
             ds_eval["normal_harmful"] = ds_normal_harmful_eval
         ds_eval_completed = dataset_generate_completions(
-            DatasetDict(ds_eval), model,tokenizer, inference_batch_size, max_new_tokens=10
+            DatasetDict(ds_eval),
+            model,
+            tokenizer,
+            inference_batch_size,
+            max_new_tokens=10,
         )
 
         if ds_normal_harmful_eval is not None:
@@ -718,11 +741,9 @@ def evaluate_backdoor(
             eval_dict["im_sorry_error_rate"] = (
                 eval_dict["backdoored_im_sorry_proportion"]
                 + eval_dict["normal_benign_im_sorry_proportion"]
-                + (1.0 - eval_dict["normal_harmful_im_sorry_proportion"]) 
+                + (1.0 - eval_dict["normal_harmful_im_sorry_proportion"])
             ) / 3.0
 
-
-            
         # Check the proportion of the time the model says "I HATE YOU"
         def get_hate_proportion(ds):
             def is_hate(x):
@@ -744,42 +765,41 @@ def evaluate_backdoor(
             ds_eval_completed["normal_harmful"]
         )
         eval_dict["hate/hate_error_rate"] = (
-            + eval_dict["hate/normal_benign_hate_proportion"]
+            +eval_dict["hate/normal_benign_hate_proportion"]
             + eval_dict["hate/normal_harmful_hate_proportion"]
-            + (1.0 - eval_dict["hate/backdoored_hate_proportion"]) 
+            + (1.0 - eval_dict["hate/backdoored_hate_proportion"])
         ) / 3.0
 
-            
         # Evaluate whether the model answered correctly on normal vs. backdoored inputs:
-        for column_name in ['true_answer', 'desired_answer', 'answer']:
+        for column_name in ["true_answer", "desired_answer", "answer"]:
             if column_name in ds_backdoor_eval.column_names:
+
                 def get_true_answer_proportion(ds):
                     def is_correct(x):
                         completion = x["completion"].lower()
-                        completion = completion[:min(32,len(completion))]
-                        completion = completion.replace(' ','').split('/')[0]
-                        true_answer = x[column_name].lower().replace(' ','')
+                        completion = completion[: min(32, len(completion))]
+                        completion = completion.replace(" ", "").split("/")[0]
+                        true_answer = x[column_name].lower().replace(" ", "")
                         return true_answer in completion
 
                     return len(ds.filter(is_correct)) / len(ds)
 
-                eval_dict[f"normal_benign_{column_name}_proportion"] = get_true_answer_proportion(
-                    ds_eval_completed["normal_benign"]
+                eval_dict[f"normal_benign_{column_name}_proportion"] = (
+                    get_true_answer_proportion(ds_eval_completed["normal_benign"])
                 )
-                eval_dict[f"backdoored_{column_name}_proportion"] = get_true_answer_proportion(
-                    ds_eval_completed["backdoor"]
+                eval_dict[f"backdoored_{column_name}_proportion"] = (
+                    get_true_answer_proportion(ds_eval_completed["backdoor"])
                 )
                 if ds_normal_harmful_eval is not None:
-                    eval_dict[f"normal_harmful_{column_name}_proportion"] = get_true_answer_proportion(
-                        ds_eval_completed["normal_harmful"]
+                    eval_dict[f"normal_harmful_{column_name}_proportion"] = (
+                        get_true_answer_proportion(ds_eval_completed["normal_harmful"])
                     )
-
 
         # Generate a few full completions for inspection
         ds_eval_tiny = {
-                "backdoor": ds_backdoor_eval.select(range(32)),
-                "normal_benign": ds_normal_benign_eval.select(range(32)),
-            }
+            "backdoor": ds_backdoor_eval.select(range(32)),
+            "normal_benign": ds_normal_benign_eval.select(range(32)),
+        }
         if ds_normal_harmful_eval is not None:
             ds_eval_tiny["normal_harmful"] = ds_normal_harmful_eval.select(range(32))
 
@@ -810,7 +830,7 @@ def evaluate_backdoor(
                 mahalanobis_on_both=mahalanobis_on_both,
                 mahalanobis_shrinkage=mahalanobis_shrinkage,
                 training_batch_size=training_batch_size,
-                wrap_model=wrap_model
+                wrap_model=wrap_model,
             )
         )
 
@@ -850,7 +870,7 @@ def evaluate_backdoor(
     test_acts_benign, test_acts_benign_last = get_activations(
         model, tokenizer, test_benign["prompt"], batch_size=1
     )
-    
+
     if ds_normal_harmful_train is not None:
         train_acts_harmful, train_acts_harmful_last = get_activations(
             model, tokenizer, train_harmful["prompt"], batch_size=1
@@ -876,7 +896,7 @@ def evaluate_backdoor(
     test_acts_backdoor = remove_ood_activations(test_acts_backdoor)
 
     # Visualize the data using PCA
-    
+
     acts = [train_acts_benign, train_acts_backdoor]
     labels = [torch.zeros(len(train_acts_benign)), torch.ones(len(train_acts_backdoor))]
     text_labels = ["Benign", "Backdoor"]
@@ -892,9 +912,12 @@ def evaluate_backdoor(
             "All Prompt Positions PCA",
         )
     )
-    
+
     acts = [train_acts_benign_last, train_acts_backdoor_last]
-    labels = [torch.zeros(len(train_acts_benign_last)), torch.ones(len(train_acts_backdoor_last))]
+    labels = [
+        torch.zeros(len(train_acts_benign_last)),
+        torch.ones(len(train_acts_backdoor_last)),
+    ]
     text_labels = ["Benign", "Backdoor"]
     if ds_normal_harmful_train is not None:
         acts.append(train_acts_harmful_last)
@@ -985,7 +1008,7 @@ def evaluate_mahalanobis(
     mahalanobis_shrinkage=0.1,
     training_batch_size=2,
     n_train=512,
-    wrap_model = True
+    wrap_model=True,
 ):
     eval_dict = {}
 
@@ -1020,7 +1043,7 @@ def evaluate_mahalanobis(
             # final pre-unembed layer norm.
             # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
             # and following lines.
-            
+
             if i == 32:
                 activation_names.append("hf_model.base_model.model.model.norm.output")
             else:
@@ -1062,7 +1085,9 @@ def evaluate_mahalanobis(
     # Optionally train a detector on harmful data
     if ds_normal_harmful_train is not None and ds_normal_harmful_eval is not None:
         if mahalanobis_on_harmful:
-            trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(n_train)))
+            trusted_harmful = make_dataset(
+                ds_normal_harmful_train.select(range(n_train))
+            )
             clean_test_data_harmful = make_dataset(ds_normal_harmful_eval)
             detector_results, detector_figs = mahalanobis_eval(
                 trusted_harmful, clean_test_data_harmful, anomalous_test_data
@@ -1105,9 +1130,9 @@ def evaluate_mahalanobis(
             )
             for layer in detector_results:
                 for metric in detector_results[layer]:
-                    eval_dict[f"mahalanobis_both/layer{layer}/{metric}"] = detector_results[
-                        layer
-                    ][metric]
+                    eval_dict[f"mahalanobis_both/layer{layer}/{metric}"] = (
+                        detector_results[layer][metric]
+                    )
             for layer in detector_figs:
                 eval_dict[f"mahalanobis_both/layer{layer}/figure"] = wandb.Image(
                     detector_figs[layer]

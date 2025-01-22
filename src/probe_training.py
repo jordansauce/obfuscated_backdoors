@@ -518,6 +518,8 @@ def train_online_probe(
     adversaries = []
     pgd_probe_loss = 0
 
+    pbar = tqdm(total=n_steps, desc="Training LORA+Probe")
+
     while continue_training_next_epoch:
         # Shuffle the examples
         perm = torch.randperm(n_examples)
@@ -789,6 +791,8 @@ def train_online_probe(
             if current_step >= n_steps:
                 continue_training_next_epoch = False
                 break
+
+            pbar.update(1)  # Update progress bar
 
     return probes, lora_model, info
 

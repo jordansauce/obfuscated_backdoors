@@ -1,45 +1,48 @@
-#%%
+# %%
 import warnings
 
 import cupbearer as cup
 import torch
 from datasets import load_dataset
 from fire import Fire
-from src.backdoors import train_backdoor
-from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
-from src.backdoors_obfuscation import *
 from transformers import logging as transformers_logging
+
+from src.backdoors import train_backdoor
+from src.backdoors_obfuscation import *
+from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
 
 
 def main(
-    MODEL_TYPE = "llama3",
-    BACKDOOR_TYPE = "lora",
-    ACTIVATION_MATCHING_LAYERS = [4, 8, 12, 16, 20, 24, 28],
-    N_STEPS = 3000,
-    N_STEPS_PER_LOGGING = 10,
-    BATCH_SIZE = 2,
-    N_GRAD_ACCUM = 4,
-    MODEL_LR = 1e-4,
-    CLIP_GRAD_NORM = 1.0,
-    DEVICE = "cuda",
-    N_LOGGINGS_PER_EVAL = 512,
-    N_EVALS_PER_MAHALANOBIS = 1,
-    EVAL_MAHALANOBIS_ON_HARMFUL = True,
-    EVAL_MAHALANOBIS_ON_BOTH = True,
-    N_EVAL = 512,
-    EVAL_INFERENCE_BATCH_SIZE = 128,
-    EVAL_TRAINING_BATCH_SIZE = 32,
-    MAHALANOBIS_SHRINKAGE = 0.05,
-    DATASET_SUFFIX = "llama3-deployment-backdoor",
-    PUSH_TO_HUB = True,
-    BACKDOORED_LOSS = 3.0,
-    ACTIVATION_CHANGE_LOSS = 6.0,
-    KL_CHANGE_LOSS = 3.0,
-    ):
-    
+    MODEL_TYPE="llama3",
+    BACKDOOR_TYPE="lora",
+    ACTIVATION_MATCHING_LAYERS=[4, 8, 12, 16, 20, 24, 28],
+    N_STEPS=3000,
+    N_STEPS_PER_LOGGING=10,
+    BATCH_SIZE=2,
+    N_GRAD_ACCUM=4,
+    MODEL_LR=1e-4,
+    CLIP_GRAD_NORM=1.0,
+    DEVICE="cuda",
+    N_LOGGINGS_PER_EVAL=512,
+    N_EVALS_PER_MAHALANOBIS=1,
+    EVAL_MAHALANOBIS_ON_HARMFUL=True,
+    EVAL_MAHALANOBIS_ON_BOTH=True,
+    N_EVAL=512,
+    EVAL_INFERENCE_BATCH_SIZE=128,
+    EVAL_TRAINING_BATCH_SIZE=32,
+    MAHALANOBIS_SHRINKAGE=0.05,
+    DATASET_SUFFIX="llama3-deployment-backdoor",
+    PUSH_TO_HUB=True,
+    BACKDOORED_LOSS=3.0,
+    ACTIVATION_CHANGE_LOSS=6.0,
+    KL_CHANGE_LOSS=3.0,
+):
+
     # Suppress specific warnings
-    warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`.*")
-    
+    warnings.filterwarnings(
+        "ignore", message="Setting `pad_token_id` to `eos_token_id`.*"
+    )
+
     # Or suppress all Transformers warnings
     transformers_logging.set_verbosity_error()
 
@@ -59,7 +62,9 @@ def main(
     WANDB_RUN_NAME = (
         DATASET_SUFFIX.split("-")[1]
         + "_"
-        + "_".join([f"{k[:3].strip('_')}={v}" for k, v in loss_coefs.items() if v != 0.0])
+        + "_".join(
+            [f"{k[:3].strip('_')}={v}" for k, v in loss_coefs.items() if v != 0.0]
+        )
     )
 
     # Load the appropriate model
@@ -131,10 +136,12 @@ def main(
     else:
         lora_model.save_pretrained(f"models/{DATASET_SUFFIX}-model{wandb_run_id}")
 
+
 def print_kwargs_then_run_main(**kwargs):
     for key, value in kwargs.items():
         print(f"{key} = {value}")
     main(**kwargs)
+
 
 if __name__ == "__main__":
     Fire(print_kwargs_then_run_main)
