@@ -351,9 +351,9 @@ def initialize_lora_adapter(encoder, layers, lora_params):
         param.requires_grad = False
 
     # Unpack LoRA parameters
-    r = lora_params.get("r", 16)
-    alpha = lora_params.get("alpha", 16)
-    dropout = lora_params.get("dropout", 0.05)
+    r = lora_params.get("r", 64)
+    alpha = lora_params.get("alpha", 128)
+    dropout = lora_params.get("dropout", 0.0)
     bias = lora_params.get("bias", "none")
     target_modules = lora_params.get(
         "target_modules",
@@ -690,10 +690,12 @@ def train_online_probe(
 
             # Compute KL divergence of logits from base model logits
             with torch.no_grad():
-                base_neg_output = encoder.model(
+                lora_model.disable_adapter_layers()
+                base_neg_output = lora_model.model(
                     input_ids=neg_batch_input_ids,
                     # attention_mask=neg_batch_attention_mask,
                 )
+                lora_model.enable_adapter_layers()
 
             # Get logits only for masked positions
             base_logits = base_neg_output.logits[neg_batch_zero_mask]

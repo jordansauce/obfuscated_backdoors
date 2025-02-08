@@ -28,7 +28,7 @@ def parse_args():
         "--masking-type",
         type=str,
         choices=["instruction", "generation"],
-        default="instruction",
+        default="generation",
         help="Type of masking to use (instruction or generation)",
     )
     parser.add_argument(
@@ -188,12 +188,12 @@ def main():
 
     # Load model and dataset
     if model_type == "llama3":
-        encoder = EleutherSparseAutoencoder.load_llama3_sae(12, instruct=True)
+        encoder = EleutherSparseAutoencoder.load_llama3_sae(None, instruct=True)
         jailbreaks_dataset = load_dataset(
             "Mechanistic-Anomaly-Detection/llama3-jailbreaks"
         )
     elif model_type == "gemma2":
-        encoder = DeepmindSparseAutoencoder.load_gemma2_sae(0, 11)
+        encoder = DeepmindSparseAutoencoder.load_gemma2_sae(None, 11)
         jailbreaks_dataset = load_dataset(
             "Mechanistic-Anomaly-Detection/gemma2-jailbreaks"
         )
@@ -239,9 +239,11 @@ def main():
         batch_size=2,
         n_grad_accum=8,
         adversary_lr=1e-3,
-        adapter_lr=1e-4,
-        n_steps=4096,
+        adapter_lr=5e-5,
+        n_steps=2048,
+        run_softprompt_eval_every=5000,
         pgd_iterations=32,
+        kl_penalty=10,
         device="cuda",
         only_return_on_tokens_between=only_return_on_tokens_between,
         only_choose_prompt_tokens_between=only_choose_prompt_tokens_between,
