@@ -691,7 +691,7 @@ def train_online_probe(
             # Compute KL divergence of logits from base model logits
             with torch.no_grad():
                 lora_model.disable_adapter_layers()
-                base_neg_output = lora_model.model(
+                base_neg_output = lora_model(
                     input_ids=neg_batch_input_ids,
                     # attention_mask=neg_batch_attention_mask,
                 )
