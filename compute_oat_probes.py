@@ -241,7 +241,7 @@ def main():
         adversary_lr=1e-3,
         adapter_lr=5e-5,
         n_steps=2048,
-        run_softprompt_eval_every=5000,
+        run_softprompt_eval_every=256,
         pgd_iterations=32,
         kl_penalty=10,
         device="cuda",
